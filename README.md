@@ -41,9 +41,9 @@ For Data Uri, which often base64 encoded JSON data, I'll decode it as raw JSON.
 For the sake of sourceMap is in the form of 
 ```json
 {
-    "version": X,
-    "sources": ["file1", "file2", ... ],
-    "sourcesContent": ["file1-content", "file2-content", ...],
+    "version": 3,
+    "sources": ["file1", "file2", "..."],
+    "sourcesContent": ["file1-content", "file2-content", "..."],
     "mappings": "CAAA,SAAA, ...",
 }
 ```
@@ -57,6 +57,7 @@ I display the `sources` part in Burp Tab currently. Any advices are welcome!!!
 ```bash
 $ chmod +x compile.sh
 $ ./compile.sh
+$ #output path: build/sourceMap.jar 
 ```
 
 ## Manual Installation Guide
