@@ -13,6 +13,7 @@ import java.util.Arrays;
 import java.nio.charset.Charset;
 
 import fuzzlesoft.JsonParse;
+import fuzzlesoft.JsonParseException;
 import jdatauri.DataUri;
 
 public class BurpExtender implements IBurpExtender, IScannerCheck, ITab
@@ -45,15 +46,14 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab
         // craft our tab
         prepareTabUI();
         callbacks.addSuiteTab(this);
+
+        // register Scanner Listener
+        callbacks.registerScannerCheck(this);
         
-        // register ourselves as an HTTP listener
-        //callbacks.registerHttpListener(this);
         System.out.println("Burp " + EXT_NAME + " loaded");
         System.out.println("Copyright (c) 2020 Tree");
 
         textArea.setText("Hel1o ... Hack3r ...");
-
-        callbacks.registerScannerCheck(this);
 
         cbs = callbacks;
     }
@@ -68,10 +68,10 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab
         IRequestInfo request = helpers.analyzeRequest(res);
         URL urlReq = request.getUrl();
         IResponseInfo response = helpers.analyzeResponse(res.getResponse());
-        String mimeType = response.getStatedMimeType();
-        if ("script".equals(mimeType.toLowerCase())) {
-            textArea.append("\n" + "[+] Potential SourceMap URL found IN " + urlReq.toString());
-            //byte[] resBodyBytes = Arrays.copyOfRange(res.getResponse(), 0, response.getBodyOffset());
+        //String mimeType = response.getStatedMimeType();
+        //if ("script".equals(mimeType.toLowerCase())) {  // passive mode
+        if (urlReq.toString().toLowerCase().endsWith(".js")) {    // aggressive mode
+            String prefix = "\n[+] Potential SourceMap URL found IN " + urlReq.toString();
             String resText = helpers.bytesToString(res.getResponse());
             resText = resText.substring(response.getBodyOffset());
             for (String line : resText.split("\\r?\\n")) {
@@ -83,11 +83,15 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab
                     if (mapUrl.toLowerCase().startsWith("data:")) {
                         DataUri u = DataUri.parse(mapUrl, Charset.forName("US-ASCII"));
                         data = helpers.bytesToString(u.getData());
-                        textArea.append("\n\t" + 
-                                mapUrl.substring(0, 50) + "... " +
+                        mapUrl =  mapUrl.substring(0, (mapUrl.length() > 50 ? 50 : mapUrl.length()));  // trim URL length
+                        textArea.append(prefix + "\n\t" + mapUrl + "... " +
                                 "Bytes Parsed: " + Integer.toString(data.length()));
+
                     }else {
-                        //textArea.append("\n\t" + mapUrl);
+                        // trim html tag after mapUrl ( TODO further )
+                        int tagIdx = mapUrl.indexOf("</");
+                        if (tagIdx != -1)
+                            mapUrl = mapUrl.substring(0, tagIdx);
                         // GET source map data from URL
                         if (!mapUrl.toLowerCase().startsWith("http")) {
                             String path = urlReq.getPath();
@@ -100,23 +104,27 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab
                                     helpers.buildHttpRequest(new URL(mapUrl))
                             );
                             IResponseInfo mapResponse = helpers.analyzeResponse(r2.getResponse());
-                            textArea.append("\n\t" + mapUrl + " => " + Short.toString(mapResponse.getStatusCode()));
+                            textArea.append(prefix + "\n\t" + mapUrl + " => " + Short.toString(mapResponse.getStatusCode()));
                             if (mapResponse.getStatusCode() == 200) {
                                 data = getResponseBodyStr(r2);
                             }
                         } catch (MalformedURLException e) {
                             System.err.println(e);
-                            textArea.append("\n\t" + mapUrl + " => [Error]");
+                            textArea.append(prefix + "\n\t" + mapUrl + " => [Error]");
                         }
                     }
                     result.add(new ScanIssue(urlReq, res, mapUrl));
+                    prefix = "";
 
                     if (data != null)
                     {
-                        for(String filename : extractSources(data))
-                        {
-                            textArea.append("\n\t\t" + filename);
+                        try {
+                            for(String filename : extractSources(data))
+                                textArea.append("\n\t\t" + filename);
+                        } catch(JsonParseException e) {
+                            System.err.println("Error Parsing data from " + mapUrl);
                         }
+
                     }
                 }
             }
@@ -151,13 +159,8 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab
 
     private List<String> extractSources(String jsonData)
     {
-        List<String> result = new ArrayList<String>();
         Map<String, Object> map = JsonParse.map(jsonData);
-        //System.out.println((String) map.get("sources"));
-        for (String o : (List<String>) map.get("sources")) {
-            result.add(o);
-        }
-        return result;
+        return (List<String>) map.get("sources");
     }
 
     //
@@ -220,13 +223,13 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab
     private class ScanIssue implements IScanIssue
     {
         private URL url;
-        private IHttpRequestResponse rr;
+        private IHttpRequestResponse reqres;
         private String mapUrl;
         
-        ScanIssue(URL _url, IHttpRequestResponse _rr, String sourceMapURL)
+        ScanIssue(URL _url, IHttpRequestResponse _reqres, String sourceMapURL)
         {
             url = _url;
-            rr = _rr;
+            reqres = _reqres;
             mapUrl = sourceMapURL;
         }
 
@@ -279,12 +282,12 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab
 
         public IHttpRequestResponse[] getHttpMessages()
         {
-            return new IHttpRequestResponse[]{rr};
+            return new IHttpRequestResponse[]{reqres};
         }
 
         public IHttpService getHttpService()
         {
-            return rr.getHttpService();
+            return reqres.getHttpService();
         }
     }
 }
