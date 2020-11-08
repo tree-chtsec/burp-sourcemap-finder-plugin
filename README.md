@@ -16,7 +16,7 @@ inurl:js filetype:map
 
 ![sample-image](images/f1nder-screenshot.png)
 
-## Logic in Background
+## Core Logic
 
 ### phase I
 
