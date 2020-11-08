@@ -2,5 +2,5 @@
 
 set -e
 
-javac -d build src/main/burp/*.java
+javac -d build src/main/*/*.java
 (cd build; jar cvf sourceMap.jar *)

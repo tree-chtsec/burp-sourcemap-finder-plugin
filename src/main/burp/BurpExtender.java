@@ -4,14 +4,23 @@ import java.io.PrintStream;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
+import java.net.URL;
+import java.net.MalformedURLException;
+import java.util.Map;
 import java.util.List;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.nio.charset.Charset;
+
+import fuzzlesoft.JsonParse;
+import jdatauri.DataUri;
 
 public class BurpExtender implements IBurpExtender, IScannerCheck, ITab
 {
     private static final String EXT_NAME = "SourceMap F1nder";
-    private static final String SOURCE_MAP = "//# sourceMappingURL";
+    private static final String SOURCE_MAP = "//# sourceMappingURL=";
     
+    private IBurpExtenderCallbacks cbs;
     private IExtensionHelpers helpers;
     private JPanel tab;
     private JTextArea textArea;
@@ -45,6 +54,8 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab
         textArea.setText("Hel1o ... Hack3r ...");
 
         callbacks.registerScannerCheck(this);
+
+        cbs = callbacks;
     }
 
     //
@@ -55,21 +66,61 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab
     public List<IScanIssue> doPassiveScan(IHttpRequestResponse res) {
         List<IScanIssue> result = new ArrayList<IScanIssue>();
         IRequestInfo request = helpers.analyzeRequest(res);
-        java.net.URL urlReq = request.getUrl();
-        byte[] resBytes = res.getResponse();
-        String mimeType = helpers.analyzeResponse(resBytes).getStatedMimeType();
+        URL urlReq = request.getUrl();
+        IResponseInfo response = helpers.analyzeResponse(res.getResponse());
+        String mimeType = response.getStatedMimeType();
         if ("script".equals(mimeType.toLowerCase())) {
-            textArea.append("\n" + "[+] Valid URL found: " + urlReq.toString());
-            String resText = helpers.bytesToString(resBytes);
+            textArea.append("\n" + "[+] Potential SourceMap URL found IN " + urlReq.toString());
+            //byte[] resBodyBytes = Arrays.copyOfRange(res.getResponse(), 0, response.getBodyOffset());
+            String resText = helpers.bytesToString(res.getResponse());
+            resText = resText.substring(response.getBodyOffset());
             for (String line : resText.split("\\r?\\n")) {
-                if (line.indexOf(SOURCE_MAP) != -1) {
-                    textArea.append("\n\t" + line);
-                    result.add(new ScanIssue(urlReq, res));
-                    break;
+                int occurIdx = line.indexOf(SOURCE_MAP);
+                if (occurIdx != -1) {
+
+                    String data = null;
+                    String mapUrl = line.substring(occurIdx + SOURCE_MAP.length());
+                    if (mapUrl.toLowerCase().startsWith("data:")) {
+                        DataUri u = DataUri.parse(mapUrl, Charset.forName("US-ASCII"));
+                        data = helpers.bytesToString(u.getData());
+                        textArea.append("\n\t" + 
+                                mapUrl.substring(0, 50) + "... " +
+                                "Bytes Parsed: " + Integer.toString(data.length()));
+                    }else {
+                        //textArea.append("\n\t" + mapUrl);
+                        // GET source map data from URL
+                        if (!mapUrl.toLowerCase().startsWith("http")) {
+                            String path = urlReq.getPath();
+                            mapUrl = String.format("%s://%s%s/%s", urlReq.getProtocol(), 
+                                    urlReq.getAuthority(), path.substring(0, path.lastIndexOf("/")), mapUrl);
+                        }
+                        try {
+                            IHttpRequestResponse r2 = cbs.makeHttpRequest(
+                                    res.getHttpService(), 
+                                    helpers.buildHttpRequest(new URL(mapUrl))
+                            );
+                            IResponseInfo mapResponse = helpers.analyzeResponse(r2.getResponse());
+                            textArea.append("\n\t" + mapUrl + " => " + Short.toString(mapResponse.getStatusCode()));
+                            if (mapResponse.getStatusCode() == 200) {
+                                data = getResponseBodyStr(r2);
+                            }
+                        } catch (MalformedURLException e) {
+                            System.err.println(e);
+                            textArea.append("\n\t" + mapUrl + " => [Error]");
+                        }
+                    }
+                    result.add(new ScanIssue(urlReq, res, mapUrl));
+
+                    if (data != null)
+                    {
+                        for(String filename : extractSources(data))
+                        {
+                            textArea.append("\n\t\t" + filename);
+                        }
+                    }
                 }
             }
         }
-        resBytes = null;
         return result;
     }
 
@@ -88,6 +139,25 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab
             IScannerInsertionPoint insertionPoint)
     {
         return new ArrayList<IScanIssue>();
+    }
+
+    private String getResponseBodyStr(IHttpRequestResponse reqres)
+    {
+        byte[] resBytes = reqres.getResponse();
+        IResponseInfo response = helpers.analyzeResponse(resBytes);
+        //byte[] resBodyBytes = Arrays.copyOfRange(resBytes, 0, response.getBodyOffset());
+        return helpers.bytesToString(resBytes).substring(response.getBodyOffset());
+    }
+
+    private List<String> extractSources(String jsonData)
+    {
+        List<String> result = new ArrayList<String>();
+        Map<String, Object> map = JsonParse.map(jsonData);
+        //System.out.println((String) map.get("sources"));
+        for (String o : (List<String>) map.get("sources")) {
+            result.add(o);
+        }
+        return result;
     }
 
     //
@@ -149,16 +219,18 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab
 
     private class ScanIssue implements IScanIssue
     {
-        private java.net.URL url;
+        private URL url;
         private IHttpRequestResponse rr;
+        private String mapUrl;
         
-        ScanIssue(java.net.URL _url, IHttpRequestResponse _rr)
+        ScanIssue(URL _url, IHttpRequestResponse _rr, String sourceMapURL)
         {
             url = _url;
             rr = _rr;
+            mapUrl = sourceMapURL;
         }
 
-        public java.net.URL getUrl()
+        public URL getUrl()
         {
             return url;
         }
@@ -196,7 +268,8 @@ public class BurpExtender implements IBurpExtender, IScannerCheck, ITab
         public String getIssueDetail()
         {
             return "Burp Scanner has analysed the following JS file for links:" + 
-                "<b>" + url.toString() + "</b><br><br>";
+                "<b>" + url.toString() + "</b><br><br>" +
+                "<b>" + mapUrl + "</b><br></br>";
         }
 
         public String getRemediationDetail()
